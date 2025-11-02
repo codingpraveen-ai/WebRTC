@@ -1,8 +1,9 @@
-import './style.css';
+import { initializeApp } from "https://www.gstatic.com/firebasejs/11.0.1/firebase-app.js";
+import { 
+  getFirestore, collection, doc, setDoc, getDoc, addDoc, onSnapshot 
+} from "https://www.gstatic.com/firebasejs/11.0.1/firebase-firestore.js";
 
-import firebase from 'firebase/app';
-import 'firebase/firestore';
-
+// --- Firebase Configuration ---
 const firebaseConfig = {
   apiKey: "AIzaSyDiLyoUnkgCt1oeMvDTvsCxPMTMC5sN0RY",
   authDomain: "webrtc-a6287.firebaseapp.com",
@@ -13,26 +14,24 @@ const firebaseConfig = {
   measurementId: "G-TR0X75XRND"
 };
 
-if (!firebase.apps.length) {
-  firebase.initializeApp(firebaseConfig);
-}
-const firestore = firebase.firestore();
+// Initialize Firebase + Firestore
+const app = initializeApp(firebaseConfig);
+const firestore = getFirestore(app);
 
+// --- ICE Server Config ---
 const servers = {
   iceServers: [
-    {
-      urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
-    },
+    { urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'] },
   ],
   iceCandidatePoolSize: 10,
 };
 
-// Global State
+// --- Global Variables ---
 const pc = new RTCPeerConnection(servers);
 let localStream = null;
 let remoteStream = null;
 
-// HTML elements
+// --- HTML Elements ---
 const webcamButton = document.getElementById('webcamButton');
 const webcamVideo = document.getElementById('webcamVideo');
 const callButton = document.getElementById('callButton');
@@ -41,22 +40,17 @@ const answerButton = document.getElementById('answerButton');
 const remoteVideo = document.getElementById('remoteVideo');
 const hangupButton = document.getElementById('hangupButton');
 
-// 1. Setup media sources
-
+// --- 1. Setup Media Sources ---
 webcamButton.onclick = async () => {
   localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
   remoteStream = new MediaStream();
 
   // Push tracks from local stream to peer connection
-  localStream.getTracks().forEach((track) => {
-    pc.addTrack(track, localStream);
-  });
+  localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-  // Pull tracks from remote stream, add to video stream
+  // Pull tracks from remote stream, add to video element
   pc.ontrack = (event) => {
-    event.streams[0].getTracks().forEach((track) => {
-      remoteStream.addTrack(track);
-    });
+    event.streams[0].getTracks().forEach(track => remoteStream.addTrack(track));
   };
 
   webcamVideo.srcObject = localStream;
@@ -67,21 +61,23 @@ webcamButton.onclick = async () => {
   webcamButton.disabled = true;
 };
 
-// 2. Create an offer
+// --- 2. Create an Offer ---
 callButton.onclick = async () => {
-  // Reference Firestore collections for signaling
-  const callDoc = firestore.collection('calls').doc();
-  const offerCandidates = callDoc.collection('offerCandidates');
-  const answerCandidates = callDoc.collection('answerCandidates');
+  // Create Firestore references
+  const callDoc = doc(collection(firestore, 'calls'));
+  const offerCandidates = collection(callDoc, 'offerCandidates');
+  const answerCandidates = collection(callDoc, 'answerCandidates');
 
   callInput.value = callDoc.id;
 
-  // Get candidates for caller, save to db
+  // ICE candidates for caller
   pc.onicecandidate = (event) => {
-    event.candidate && offerCandidates.add(event.candidate.toJSON());
+    if (event.candidate) {
+      addDoc(offerCandidates, event.candidate.toJSON());
+    }
   };
 
-  // Create offer
+  // Create offer SDP
   const offerDescription = await pc.createOffer();
   await pc.setLocalDescription(offerDescription);
 
@@ -90,10 +86,10 @@ callButton.onclick = async () => {
     type: offerDescription.type,
   };
 
-  await callDoc.set({ offer });
+  await setDoc(callDoc, { offer });
 
   // Listen for remote answer
-  callDoc.onSnapshot((snapshot) => {
+  onSnapshot(callDoc, (snapshot) => {
     const data = snapshot.data();
     if (!pc.currentRemoteDescription && data?.answer) {
       const answerDescription = new RTCSessionDescription(data.answer);
@@ -101,8 +97,8 @@ callButton.onclick = async () => {
     }
   });
 
-  // When answered, add candidate to peer connection
-  answerCandidates.onSnapshot((snapshot) => {
+  // When answered, add ICE candidates
+  onSnapshot(answerCandidates, (snapshot) => {
     snapshot.docChanges().forEach((change) => {
       if (change.type === 'added') {
         const candidate = new RTCIceCandidate(change.doc.data());
@@ -114,18 +110,20 @@ callButton.onclick = async () => {
   hangupButton.disabled = false;
 };
 
-// 3. Answer the call with the unique ID
+// --- 3. Answer a Call ---
 answerButton.onclick = async () => {
   const callId = callInput.value;
-  const callDoc = firestore.collection('calls').doc(callId);
-  const answerCandidates = callDoc.collection('answerCandidates');
-  const offerCandidates = callDoc.collection('offerCandidates');
+  const callDoc = doc(firestore, 'calls', callId);
+  const answerCandidates = collection(callDoc, 'answerCandidates');
+  const offerCandidates = collection(callDoc, 'offerCandidates');
 
   pc.onicecandidate = (event) => {
-    event.candidate && answerCandidates.add(event.candidate.toJSON());
+    if (event.candidate) {
+      addDoc(answerCandidates, event.candidate.toJSON());
+    }
   };
 
-  const callData = (await callDoc.get()).data();
+  const callData = (await getDoc(callDoc)).data();
 
   const offerDescription = callData.offer;
   await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
@@ -138,13 +136,13 @@ answerButton.onclick = async () => {
     sdp: answerDescription.sdp,
   };
 
-  await callDoc.update({ answer });
+  await setDoc(callDoc, { ...callData, answer });
 
-  offerCandidates.onSnapshot((snapshot) => {
+  // Listen for offer ICE candidates
+  onSnapshot(offerCandidates, (snapshot) => {
     snapshot.docChanges().forEach((change) => {
-      console.log(change);
       if (change.type === 'added') {
-        let data = change.doc.data();
+        const data = change.doc.data();
         pc.addIceCandidate(new RTCIceCandidate(data));
       }
     });
